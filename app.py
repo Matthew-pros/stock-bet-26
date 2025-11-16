@@ -3,95 +3,88 @@ import yfinance as yf
 import pandas as pd
 import requests
 from bs4 import BeautifulSoup
-from datetime import datetime
+from datetime import datetime, timedelta
+from scipy.stats import norm
+import numpy as np
 
-# Aktualizované multiples z NYU Stern Jan 2025 (P/E, P/B, P/S, EV/EBITDA)
-# Mapping yfinance sectors na NYU pro přesnost
-sector_mapping = {
-    'Technology': 'Software (System & Application)',  # P/E high pro growth
-    'Financial Services': 'Brokerage & Investment Banking',
-    'Real Estate': 'R.E.I.T.',
-    'Consumer Cyclical': 'Retail (General)',
-    'Consumer Defensive': 'Food Processing',
-    'Healthcare': 'Drugs (Pharmaceutical)',
-    'Utilities': 'Utility (General)',
-    'Communication Services': 'Telecom. Services',
-    'Energy': 'Oil/Gas (Integrated)',
-    'Industrials': 'Machinery',
-    'Basic Materials': 'Chemical (Basic)',
-    'Other': 'Total Market'
+# NYU Stern multiples z 2025 data (kombinováno z tool results)
+sector_multiples = {
+    'Technology': {'current_pe': 64.15, 'forward_pe': 86.40, 'pb': 11.12, 'ps': 14.26, 'evebitda': 34.48, 'peg': 1.5, 'growth': 0.15, 'roe': 0.20},
+    'Financial Services': {'current_pe': 35.16, 'forward_pe': 20.64, 'pb': 2.11, 'ps': 5.14, 'evebitda': 62.82, 'peg': 1.29, 'growth': 0.1537, 'roe': 0.1311},
+    'Real Estate': {'current_pe': 44.63, 'forward_pe': 41.45, 'pb': 2.01, 'ps': 6.02, 'evebitda': 20.33, 'peg': 4.75, 'growth': 0.05, 'roe': 0.045},
+    'Consumer Cyclical': {'current_pe': 28.81, 'forward_pe': 22.74, 'pb': 8.43, 'ps': 1.94, 'evebitda': 18.21, 'peg': 10.52, 'growth': 0.08, 'roe': 0.12},
+    'Consumer Defensive': {'current_pe': 23.97, 'forward_pe': 22.81, 'pb': 2.18, 'ps': 1.35, 'evebitda': 11.17, 'peg': 2.04, 'growth': 0.06, 'roe': 0.10},
+    'Healthcare': {'current_pe': 129.64, 'forward_pe': 18.72, 'pb': 5.70, 'ps': 4.84, 'evebitda': 15.37, 'peg': 2.61, 'growth': 0.12, 'roe': 0.15},
+    'Utilities': {'current_pe': 19.19, 'forward_pe': 16.47, 'pb': 1.82, 'ps': 2.97, 'evebitda': 13.44, 'peg': 3.28, 'growth': 0.04, 'roe': 0.08},
+    'Communication Services': {'current_pe': 74.81, 'forward_pe': 46.36, 'pb': 1.62, 'ps': 1.30, 'evebitda': 6.62, 'peg': 3.10, 'growth': 0.10, 'roe': 0.09},
+    'Energy': {'current_pe': 9.09, 'forward_pe': 14.75, 'pb': 1.66, 'ps': 1.39, 'evebitda': 6.70, 'peg': 4.15, 'growth': 0.07, 'roe': 0.14},
+    'Industrials': {'current_pe': 43.07, 'forward_pe': 21.97, 'pb': 4.27, 'ps': 2.87, 'evebitda': 15.35, 'peg': 1.92, 'growth': 0.09, 'roe': 0.13},
+    'Basic Materials': {'current_pe': 15.75, 'forward_pe': 14.53, 'pb': 1.61, 'ps': 0.70, 'evebitda': 7.97, 'peg': 2.55, 'growth': 0.05, 'roe': 0.11},
+    'Other': {'current_pe': 22.0, 'forward_pe': 18.0, 'pb': 3.0, 'ps': 2.76, 'evebitda': 11.0, 'peg': 2.0, 'growth': 0.1, 'roe': 0.12}
 }
 
-# Dict multiples (z extrahovaných dat, zkráceno pro příklad; plný v kódu)
-sector_multiples = {
-    'Software (System & Application)': {'pe': 179.80, 'pb': 10.73, 'ps': 11.20, 'evebitda': 27.98},
-    'Brokerage & Investment Banking': {'pe': 35.16, 'pb': 2.11, 'ps': 'NA', 'evebitda': None},  # NA handle as 0 or avg
-    'R.E.I.T.': {'pe': 44.63, 'pb': 2.01, 'ps': 6.02, 'evebitda': 20.33},
-    'Retail (General)': {'pe': 28.81, 'pb': 8.43, 'ps': 1.94, 'evebitda': 18.21},
-    'Food Processing': {'pe': 23.97, 'pb': 2.18, 'ps': 1.35, 'evebitda': 11.17},
-    'Drugs (Pharmaceutical)': {'pe': 129.64, 'pb': 5.70, 'ps': 4.84, 'evebitda': 15.37},
-    'Utility (General)': {'pe': 19.19, 'pb': 1.82, 'ps': 2.97, 'evebitda': 13.44},
-    'Telecom. Services': {'pe': 74.81, 'pb': 1.62, 'ps': 1.30, 'evebitda': 6.62},
-    'Oil/Gas (Integrated)': {'pe': 9.09, 'pb': 1.66, 'ps': 1.39, 'evebitda': 6.70},
-    'Machinery': {'pe': 43.07, 'pb': 4.27, 'ps': 2.87, 'evebitda': 15.35},
-    'Chemical (Basic)': {'pe': 15.75, 'pb': 1.61, 'ps': 0.70, 'evebitda': 7.97},
-    'Total Market': {'pe': 22.0, 'pb': 3.0, 'ps': 2.76, 'evebitda': 11.0}  # Fallback
-    # Přidej všechny z dat výše, např. pro Technology average Software+Semiconductor atd.
+# Sector mapping yfinance to NYU
+sector_mapping = {
+    'Technology': 'Technology',
+    'Financial Services': 'Financial Services',
+    'Real Estate': 'Real Estate',
+    'Consumer Cyclical': 'Consumer Cyclical',
+    'Consumer Defensive': 'Consumer Defensive',
+    'Healthcare': 'Healthcare',
+    'Utilities': 'Utilities',
+    'Communication Services': 'Communication Services',
+    'Energy': 'Energy',
+    'Industrials': 'Industrials',
+    'Basic Materials': 'Basic Materials',
+    'Other': 'Other'
 }
 
 @st.cache_data(ttl=86400)
 def get_index_tickers():
     tickers = []
     try:
-        # S&P500
         sp500_url = 'https://en.wikipedia.org/wiki/List_of_S%26P_500_companies'
         sp500 = pd.read_html(sp500_url)[0]['Symbol'].tolist()
         tickers.extend(sp500)
-    except:
-        st.warning('S&P500 fetch failed, using fallback')
-        tickers.extend(['AAPL', 'MSFT', 'GOOGL'])  # Fallback example
+    except Exception as e:
+        st.warning(f'S&P500 fetch failed: {e}')
+        tickers.extend(['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'])  # Fallback
 
     try:
-        # NASDAQ100
-        nasdaq_url = 'https://www.slickcharts.com/nasdaq100'
-        response = requests.get(nasdaq_url, headers={'User-Agent': 'Mozilla/5.0'})
-        soup = BeautifulSoup(response.text, 'html.parser')
-        nasdaq = [row.find_all('td')[1].text for row in soup.find('table').find_all('tr')[1:]]  # Adjust index if needed
+        nasdaq_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
+        nasdaq = pd.read_html(nasdaq_url)[4]['Ticker'].tolist()
         tickers.extend(nasdaq)
-    except:
-        st.warning('NASDAQ fetch failed')
+    except Exception as e:
+        st.warning(f'NASDAQ fetch failed: {e}')
 
     try:
-        # Hang Seng
-        hang_url = 'https://www.investing.com/indices/hang-sen-40-components'
-        response = requests.get(hang_url, headers={'User-Agent': 'Mozilla/5.0'})
-        soup = BeautifulSoup(response.text, 'html.parser')
-        hang = [td.text.strip() + '.HK' for td in soup.select('td.left.noWrap a')]
-        tickers.extend(hang[:50])  # Limit for speed
-    except:
-        st.warning('Hang Seng fetch failed')
+        hang_url = 'https://en.wikipedia.org/wiki/Hang_Seng_Index'
+        hang = pd.read_html(hang_url)[2]['Ticker'].tolist()
+        hang = [t + '.HK' for t in hang if t.isnumeric()]  # Oprava pro numerické codes
+        tickers.extend(hang)
+    except Exception as e:
+        st.warning(f'Hang Seng fetch failed: {e}')
 
     try:
-        # Nikkei
-        nikkei_url = 'https://markets.businessinsider.com/index/components/nikkei_225'
-        response = requests.get(nikkei_url, headers={'User-Agent': 'Mozilla/5.0'})
-        soup = BeautifulSoup(response.text, 'html.parser')
-        nikkei = [row.find('a').text.strip() + '.T' for row in soup.find_all('tr')[1:] if row.find('a')]
-        tickers.extend(nikkei[:225])
-    except:
-        st.warning('Nikkei fetch failed')
+        nikkei_url = 'https://en.wikipedia.org/wiki/Nikkei_225'
+        nikkei = pd.read_html(nikkei_url)[2]['Code'].tolist()
+        nikkei = [str(t) + '.T' for t in nikkei]
+        tickers.extend(nikkei)
+    except Exception as e:
+        st.warning(f'Nikkei fetch failed: {e}')
 
-    return list(set(tickers))[:500]  # Unique, limit pro prod speed
+    return list(set(tickers))[:500]  # Unique, limit
 
 def calculate_fair_price(ticker):
     try:
         stock = yf.Ticker(ticker)
         info = stock.info
-        financials = stock.financials
-        balance = stock.balance_sheet
-        cashflow = stock.cashflow
+        financials = stock.financials.transpose().iloc[0] if not stock.financials.empty else {}
+        balance = stock.balance_sheet.transpose().iloc[0] if not stock.balance_sheet.empty else {}
+        cashflow = stock.cashflow.transpose().iloc[0] if not stock.cashflow.empty else {}
+        earnings_hist = stock.earnings_history if hasattr(stock, 'earnings_history') else pd.DataFrame()
 
-        # 40+ metrik (přidáno pro přesnost)
+        # Metrics
         metrics = {
             'EPS': info.get('trailingEps', 0),
             'Forward EPS': info.get('forwardEps', 0),
@@ -110,7 +103,7 @@ def calculate_fair_price(ticker):
             'Quick Ratio': info.get('quickRatio', 0),
             'Current Ratio': info.get('currentRatio', 0),
             'Book Value': info.get('bookValue', 0),
-            'EBITDA': financials.loc['EBITDA'].iloc[0] if 'EBITDA' in financials.index else 0,
+            'EBITDA': financials.get('EBITDA', 0),
             'Free Cashflow': info.get('freeCashflow', 0),
             'Operating Cashflow': info.get('operatingCashflow', 0),
             'Total Debt': info.get('totalDebt', 0),
@@ -136,7 +129,7 @@ def calculate_fair_price(ticker):
             'Price To Book': info.get('priceToBook', 0),
             'Price To Free Cashflow': info.get('priceToFreeCashFlow', 0),
             'Price Fair Value': info.get('priceFairValue', 0),
-            # Přidej další jestli potřeba, např. z financials
+            'Short Interest': info.get('shortPercentOfFloat', 0),
         }
 
         bvps = metrics['Book Value']
@@ -144,28 +137,30 @@ def calculate_fair_price(ticker):
         forward_eps = metrics['Forward EPS']
         roe = metrics['ROE']
         payout = metrics['Payout Ratio']
-        growth = (1 - payout) * roe if roe > 0 else 0.05  # Retention * ROE
-        cost_equity = 0.03 + metrics['Beta'] * 0.06  # RF + beta * ERP ~9% avg
+        growth = (1 - payout) * roe if roe > 0 else sector_multiples.get(sector_mapping.get(info.get('sector', 'Other'), 'Other'), {}).get('growth', 0.05)
+        cost_equity = 0.03 + metrics['Beta'] * 0.06
         ebitda = metrics['EBITDA']
         shares = metrics['Shares Outstanding']
-        net_debt = info.get('totalDebt', 0) - info.get('totalCash', 0)
-        revenue_per_share = info.get('revenuePerShare', 0)
+        net_debt = metrics['Total Debt'] - info.get('totalCash', 0)
+        revenue_ps = info.get('revenuePerShare', 0)
         current_price = info.get('currentPrice', 0)
 
         sector = info.get('sector', 'Other')
-        nyu_sector = sector_mapping.get(sector, 'Total Market')
-        multiples = sector_multiples.get(nyu_sector, sector_multiples['Total Market'])
+        multiples = sector_multiples.get(sector_mapping.get(sector, 'Other'), sector_multiples['Other'])
 
-        # Fair vals (rozšířeno)
-        fair_pe = eps * multiples['pe'] if eps > 0 else 0
+        # Racionální fair vals
+        fair_current_pe = eps * multiples['current_pe'] if eps > 0 else 0
+        fair_forward_pe = forward_eps * multiples['forward_pe'] if forward_eps > 0 else 0
         fair_pb = bvps * multiples['pb']
-        fair_ps = revenue_per_share * (multiples['ps'] if multiples['ps'] != 'NA' else 2.76)
-        fair_evebitda = max(0, (ebitda * multiples['evebitda'] - net_debt) / shares)
-        fair_roe = (eps * (1 + growth) / (cost_equity - growth)) if (cost_equity > growth > 0) else fair_pe  # Gordon adjust
+        fair_ps = revenue_ps * multiples['ps']
+        fair_evebitda = max(0, (ebitda * multiples['evebitda'] - net_debt) / shares if shares > 0 else 0)
+        fair_ddm = (eps * (1 - payout) / (cost_equity - growth)) if (cost_equity > growth > 0) else (fair_current_pe + fair_forward_pe) / 2
 
-        # Weighted fair price (váhy optimalizované pro backtest accuracy)
-        fair_price = 0.25 * fair_pe + 0.2 * fair_pb + 0.2 * fair_ps + 0.25 * fair_evebitda + 0.1 * fair_roe
-        fair_price *= 0.95  # 5% marže
+        # Weighted: 0.25 current PE, 0.25 forward PE, 0.15 PB, 0.15 PS, 0.15 EVEBITDA, 0.05 DDM
+        fair_price = 0.25 * fair_current_pe + 0.25 * fair_forward_pe + 0.15 * fair_pb + 0.15 * fair_ps + 0.15 * fair_evebitda + 0.05 * fair_ddm
+        fair_price /= multiples['peg'] if multiples['peg'] > 0 else 1  # Adjust pro growth
+        fair_price *= (1 - 0.05 * (metrics['Debt/Equity'] / 100))  # Debt risk adjust
+        fair_price *= 0.95  # Konzervativní marže
 
         diff_nominal = fair_price - current_price
         diff_percent = (diff_nominal / current_price * 100) if current_price > 0 else 0
@@ -179,42 +174,183 @@ def calculate_fair_price(ticker):
             'Diff %': round(diff_percent, 2),
             'Value Bet': 'Yes' if diff_percent > 0 else 'No'
         }
-        result.update(metrics)  # Přidej všechny metrik do result pro df
+        result.update(metrics)
+
+        # Earnings beat prob
+        beat_prob, miss_prob = calculate_earnings_beat_prob(stock, earnings_hist, multiples)
+        result['Beat Prob (1-5)'] = beat_prob
+        result['Miss Prob (1-5)'] = miss_prob
 
         return result
     except Exception as e:
-        st.warning(f'Error for {ticker}: {e}')
+        st.warning(f'Error for {ticker}: {str(e)}')
         return None
 
-st.title('Quant Fair Price Calculator & Value Bets App')
-st.markdown('Vypočítává férovou cenu podle 40+ fundamentálů, ignoruje trh. Interaktivní sorted tabulka pro value bets.')
+def calculate_earnings_beat_prob(stock, earnings_hist, multiples):
+    try:
+        # Historical beat rate
+        if not earnings_hist.empty and 'actual' in earnings_hist and 'estimate' in earnings_hist:
+            beats = (earnings_hist['actual'] > earnings_hist['estimate']).sum()
+            total = len(earnings_hist)
+            beat_rate = beats / total if total > 0 else 0.5
+        else:
+            beat_rate = 0.5
+
+        # ESP: (latest est - consensus) / consensus
+        analysts = stock.analyst_recommendations if hasattr(stock, 'analyst_recommendations') else pd.DataFrame()
+        if not analysts.empty:
+            latest_est = analysts.iloc[0]['eps'] if 'eps' in analysts else 0
+            consensus = stock.info.get('forwardEps', 0)
+            esp = ((latest_est - consensus) / consensus * 100) if consensus != 0 else 0
+        else:
+            esp = 0
+
+        # Další faktory: earnings growth, short interest, sector growth
+        earnings_growth = stock.info.get('earningsGrowth', 0)
+        short_interest = stock.info.get('shortPercentOfFloat', 0)
+        sector_growth = multiples['growth']
+
+        # Score pro beat: 1-5
+        score = 0
+        if beat_rate > 0.7: score += 2
+        elif beat_rate > 0.5: score += 1
+        if esp > 5: score += 1
+        if earnings_growth > 0.1: score += 1
+        if short_interest < 5: score += 1
+        if sector_growth > 0.1: score += 1
+        beat_prob = min(max(score, 1), 5)
+
+        # Miss prob opačně
+        miss_score = 0
+        if beat_rate < 0.3: miss_score += 2
+        elif beat_rate < 0.5: miss_score += 1
+        if esp < -5: miss_score += 1
+        if earnings_growth < 0: miss_score += 1
+        if short_interest > 10: miss_score += 1
+        if sector_growth < 0.05: miss_score += 1
+        miss_prob = min(max(miss_score, 1), 5)
+
+        return beat_prob, miss_prob
+    except:
+        return 0, 0
+
+def black_scholes(S, K, T, r, sigma, option_type='call'):
+    if T <= 0 or sigma <= 0: return 0
+    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    if option_type == 'call':
+        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
+    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+def calculate_earnings_vol(ticker):
+    try:
+        stock = yf.Ticker(ticker)
+        earnings = stock.quarterly_earnings['Earnings'].pct_change().dropna()
+        return earnings.std() * np.sqrt(4) if len(earnings) >= 4 else 0.2
+    except:
+        return 0.2
+
+def get_options_value(ticker, r=0.04):
+    try:
+        stock = yf.Ticker(ticker)
+        current = stock.info.get('currentPrice', 0)
+        sigma = calculate_earnings_vol(ticker)
+        options_data = []
+        for exp in stock.options[:3]:
+            chain = stock.option_chain(exp)
+            exp_date = datetime.strptime(exp, '%Y-%m-%d')
+            T = (exp_date - datetime.now()).days / 365
+            for df, opt_type in [(chain.calls, 'call'), (chain.puts, 'put')]:
+                for _, row in df.iterrows():
+                    K = row['strike']
+                    market = row['lastPrice']
+                    theo = black_scholes(current, K, T, r, sigma, opt_type)
+                    value_diff = (theo - market) / market * 100 if market > 0 else 0
+                    options_data.append({
+                        'Ticker': ticker,
+                        'Type': opt_type.upper(),
+                        'Strike': K,
+                        'Expiration': exp,
+                        'Market Price': market,
+                        'Theo Price': round(theo, 2),
+                        'Value %': round(value_diff, 2),
+                        'Vol': round(sigma, 2)
+                    })
+        return pd.DataFrame(options_data)
+    except:
+        return pd.DataFrame()
+
+def get_upcoming_earnings(tickers):
+    upcoming = []
+    for t in tickers:
+        try:
+            stock = yf.Ticker(t)
+            cal = stock.calendar
+            if not cal.empty and 'Earnings Date' in cal.index:
+                earn_date = cal.loc['Earnings Date'][0]
+                if datetime.now() < earn_date < datetime.now() + timedelta(days=30):
+                    upcoming.append(t)
+        except:
+            pass
+    return upcoming
+
+# App
+st.title('Advanced Quant Stock & Options Analyzer')
+st.markdown('Fair prices z NYU 2025 data, earnings beat probs z historical + factors. Live data.')
 
 # Single ticker
-ticker = st.text_input('Zadej ticker (např. AAPL):')
+ticker = st.text_input('Ticker:')
 if ticker:
     result = calculate_fair_price(ticker.upper())
     if result:
+        beat_prob = result['Beat Prob (1-5)']
+        miss_prob = result['Miss Prob (1-5)']
+        beat_icon = '🟢' * beat_prob + '⚪' * (5 - beat_prob) + ' ↑'
+        miss_icon = '🔴' * miss_prob + '⚪' * (5 - miss_prob) + ' ↓'
+        result['Beat Icon'] = beat_icon
+        result['Miss Icon'] = miss_icon
         st.write(pd.DataFrame([result]))
+    options_df = get_options_value(ticker.upper())
+    if not options_df.empty:
+        st.write('Options:')
+        st.dataframe(options_df.sort_values('Value %', ascending=False))
 
 # All stocks
-sectors = list(sector_mapping.keys())
-selected_sectors = st.multiselect('Filtruj sektory:', sectors, default=sectors)
-
-if st.button('Načti a seřaď všechny akcie (5-10 min)'):
-    with st.spinner('Fetching & calculating...'):
+if st.button('Load & Sort All (may take time)'):
+    with st.spinner('Processing...'):
         tickers = get_index_tickers()
         results = [calculate_fair_price(t) for t in tickers if calculate_fair_price(t)]
-        df = pd.DataFrame([r for r in results if r])
-        df = df[df['Sector'].isin(selected_sectors)] if selected_sectors else df
-        df = df.sort_values('Diff %', ascending=False).reset_index(drop=True)
+        df = pd.DataFrame([r for r in results if r]).sort_values('Diff %', ascending=False)
 
-        # Interaktivní s barvami
+        for idx, row in df.iterrows():
+            beat_prob = row['Beat Prob (1-5)']
+            miss_prob = row['Miss Prob (1-5)']
+            df.at[idx, 'Beat Icon'] = '🟢' * beat_prob + ' ↑'
+            df.at[idx, 'Miss Icon'] = '🔴' * miss_prob + ' ↓'
+
         def color_diff(val):
-            color = 'green' if val > 0 else 'red'
-            return f'background-color: {color}'
+            return 'background-color: green' if val > 0 else 'background-color: red'
 
-        styled_df = df.style.applymap(color_diff, subset=['Diff %'])
-        st.dataframe(styled_df, use_container_width=True)
-        st.download_button('Stáhni CSV', df.to_csv(), 'value_bets.csv')
+        styled_df = df.style.map(color_diff, subset=['Diff %'])
+        st.dataframe(styled_df, width='stretch')
 
-st.markdown(f'Aktualizováno: {datetime.now().strftime("%Y-%m-%d %H:%M")} | Data: yfinance live.')
+        # Earnings filter
+        st.subheader('Upcoming Earnings Filter')
+        upcoming = get_upcoming_earnings(tickers)
+        if upcoming:
+            up_df = df[df['Ticker'].isin(upcoming)].sort_values('Beat Prob (1-5)', ascending=False)
+            st.dataframe(up_df)
+        else:
+            st.write('No upcoming earnings found.')
+
+        # Options all
+        options_all = pd.concat([get_options_value(t) for t in tickers[:50] if not get_options_value(t).empty])  # Limit
+        if not options_all.empty:
+            st.subheader('Top Value Options')
+            option_type = st.selectbox('Type:', ['ALL', 'CALL', 'PUT'])
+            min_value = st.slider('Min Value %:', 0, 100, 10)
+            filtered = options_all if option_type == 'ALL' else options_all[options_all['Type'] == option_type]
+            filtered = filtered[filtered['Value %'] >= min_value].sort_values('Value %', ascending=False)
+            st.dataframe(filtered.style.map(color_diff, subset=['Value %']), width='stretch')
+
+st.markdown(f'Updated: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
