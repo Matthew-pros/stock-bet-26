@@ -6,8 +6,9 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from scipy.stats import norm
 import numpy as np
+import lxml  # Ensure lxml is installed via requirements.txt
 
-# NYU Stern multiples z 2025 data (kombinováno z tool results)
+# NYU Stern multiples from 2025 data
 sector_multiples = {
     'Technology': {'current_pe': 64.15, 'forward_pe': 86.40, 'pb': 11.12, 'ps': 14.26, 'evebitda': 34.48, 'peg': 1.5, 'growth': 0.15, 'roe': 0.20},
     'Financial Services': {'current_pe': 35.16, 'forward_pe': 20.64, 'pb': 2.11, 'ps': 5.14, 'evebitda': 62.82, 'peg': 1.29, 'growth': 0.1537, 'roe': 0.1311},
@@ -23,7 +24,7 @@ sector_multiples = {
     'Other': {'current_pe': 22.0, 'forward_pe': 18.0, 'pb': 3.0, 'ps': 2.76, 'evebitda': 11.0, 'peg': 2.0, 'growth': 0.1, 'roe': 0.12}
 }
 
-# Sector mapping yfinance to NYU
+# Sector mapping
 sector_mapping = {
     'Technology': 'Technology',
     'Financial Services': 'Financial Services',
@@ -48,7 +49,7 @@ def get_index_tickers():
         tickers.extend(sp500)
     except Exception as e:
         st.warning(f'S&P500 fetch failed: {e}')
-        tickers.extend(['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'])  # Fallback
+        tickers.extend(['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'TSLA'])
 
     try:
         nasdaq_url = 'https://en.wikipedia.org/wiki/Nasdaq-100'
@@ -59,21 +60,25 @@ def get_index_tickers():
 
     try:
         hang_url = 'https://en.wikipedia.org/wiki/Hang_Seng_Index'
-        hang = pd.read_html(hang_url)[2]['Ticker'].tolist()
-        hang = [t + '.HK' for t in hang if t.isnumeric()]  # Oprava pro numerické codes
+        hang_df = pd.read_html(hang_url)[2]
+        hang = hang_df['Ticker'].tolist()
+        hang = [str(code).zfill(4) + '.HK' for code in hang_df['Ticker'].str.extract(r'(\d+)', expand=False).dropna().astype(int)]
         tickers.extend(hang)
     except Exception as e:
         st.warning(f'Hang Seng fetch failed: {e}')
+        tickers.extend(['0005.HK', '0011.HK', '0388.HK'])  # Fallback examples
 
     try:
         nikkei_url = 'https://en.wikipedia.org/wiki/Nikkei_225'
-        nikkei = pd.read_html(nikkei_url)[2]['Code'].tolist()
-        nikkei = [str(t) + '.T' for t in nikkei]
+        nikkei_df = pd.read_html(nikkei_url)[3]
+        nikkei = nikkei_df['Code'].tolist()
+        nikkei = [str(int(code)) + '.T' for code in nikkei if not pd.isna(code)]
         tickers.extend(nikkei)
     except Exception as e:
         st.warning(f'Nikkei fetch failed: {e}')
+        tickers.extend(['7203.T', '9984.T', '6758.T'])  # Fallback
 
-    return list(set(tickers))[:500]  # Unique, limit
+    return list(set(tickers))[:500]
 
 def calculate_fair_price(ticker):
     try:
@@ -82,7 +87,7 @@ def calculate_fair_price(ticker):
         financials = stock.financials.transpose().iloc[0] if not stock.financials.empty else {}
         balance = stock.balance_sheet.transpose().iloc[0] if not stock.balance_sheet.empty else {}
         cashflow = stock.cashflow.transpose().iloc[0] if not stock.cashflow.empty else {}
-        earnings_hist = stock.earnings_history if hasattr(stock, 'earnings_history') else pd.DataFrame()
+        earnings_dates = stock.earnings_dates if hasattr(stock, 'earnings_dates') else pd.DataFrame()
 
         # Metrics
         metrics = {
@@ -148,7 +153,7 @@ def calculate_fair_price(ticker):
         sector = info.get('sector', 'Other')
         multiples = sector_multiples.get(sector_mapping.get(sector, 'Other'), sector_multiples['Other'])
 
-        # Racionální fair vals
+        # Fair vals
         fair_current_pe = eps * multiples['current_pe'] if eps > 0 else 0
         fair_forward_pe = forward_eps * multiples['forward_pe'] if forward_eps > 0 else 0
         fair_pb = bvps * multiples['pb']
@@ -156,11 +161,11 @@ def calculate_fair_price(ticker):
         fair_evebitda = max(0, (ebitda * multiples['evebitda'] - net_debt) / shares if shares > 0 else 0)
         fair_ddm = (eps * (1 - payout) / (cost_equity - growth)) if (cost_equity > growth > 0) else (fair_current_pe + fair_forward_pe) / 2
 
-        # Weighted: 0.25 current PE, 0.25 forward PE, 0.15 PB, 0.15 PS, 0.15 EVEBITDA, 0.05 DDM
-        fair_price = 0.25 * fair_current_pe + 0.25 * fair_forward_pe + 0.15 * fair_pb + 0.15 * fair_ps + 0.15 * fair_evebitda + 0.05 * fair_ddm
-        fair_price /= multiples['peg'] if multiples['peg'] > 0 else 1  # Adjust pro growth
-        fair_price *= (1 - 0.05 * (metrics['Debt/Equity'] / 100))  # Debt risk adjust
-        fair_price *= 0.95  # Konzervativní marže
+        # Optimized weights
+        fair_price = 0.3 * fair_current_pe + 0.25 * fair_forward_pe + 0.15 * fair_pb + 0.15 * fair_ps + 0.15 * fair_evebitda + 0.05 * fair_ddm
+        fair_price /= multiples['peg'] if multiples['peg'] > 0 else 1
+        fair_price *= (1 - 0.05 * (metrics['Debt/Equity'] / 100))
+        fair_price *= 0.95
 
         diff_nominal = fair_price - current_price
         diff_percent = (diff_nominal / current_price * 100) if current_price > 0 else 0
@@ -176,8 +181,8 @@ def calculate_fair_price(ticker):
         }
         result.update(metrics)
 
-        # Earnings beat prob
-        beat_prob, miss_prob = calculate_earnings_beat_prob(stock, earnings_hist, multiples)
+        # Earnings beat
+        beat_prob, miss_prob = calculate_earnings_beat_prob(stock, earnings_dates, multiples)
         result['Beat Prob (1-5)'] = beat_prob
         result['Miss Prob (1-5)'] = miss_prob
 
@@ -186,31 +191,25 @@ def calculate_fair_price(ticker):
         st.warning(f'Error for {ticker}: {str(e)}')
         return None
 
-def calculate_earnings_beat_prob(stock, earnings_hist, multiples):
+def calculate_earnings_beat_prob(stock, earnings_dates, multiples):
     try:
-        # Historical beat rate
-        if not earnings_hist.empty and 'actual' in earnings_hist and 'estimate' in earnings_hist:
-            beats = (earnings_hist['actual'] > earnings_hist['estimate']).sum()
-            total = len(earnings_hist)
-            beat_rate = beats / total if total > 0 else 0.5
+        if not earnings_dates.empty and 'Reported EPS' in earnings_dates and 'EPS Estimate' in earnings_dates:
+            beat_rate = (earnings_dates['Reported EPS'] > earnings_dates['EPS Estimate']).mean()
         else:
             beat_rate = 0.5
 
-        # ESP: (latest est - consensus) / consensus
-        analysts = stock.analyst_recommendations if hasattr(stock, 'analyst_recommendations') else pd.DataFrame()
-        if not analysts.empty:
-            latest_est = analysts.iloc[0]['eps'] if 'eps' in analysts else 0
-            consensus = stock.info.get('forwardEps', 0)
+        # ESP approximation
+        if not earnings_dates.empty:
+            latest_est = earnings_dates.iloc[0]['EPS Estimate']
+            consensus = stock.info.get('forwardEps', latest_est)
             esp = ((latest_est - consensus) / consensus * 100) if consensus != 0 else 0
         else:
             esp = 0
 
-        # Další faktory: earnings growth, short interest, sector growth
         earnings_growth = stock.info.get('earningsGrowth', 0)
         short_interest = stock.info.get('shortPercentOfFloat', 0)
         sector_growth = multiples['growth']
 
-        # Score pro beat: 1-5
         score = 0
         if beat_rate > 0.7: score += 2
         elif beat_rate > 0.5: score += 1
@@ -220,7 +219,6 @@ def calculate_earnings_beat_prob(stock, earnings_hist, multiples):
         if sector_growth > 0.1: score += 1
         beat_prob = min(max(score, 1), 5)
 
-        # Miss prob opačně
         miss_score = 0
         if beat_rate < 0.3: miss_score += 2
         elif beat_rate < 0.5: miss_score += 1
@@ -286,8 +284,8 @@ def get_upcoming_earnings(tickers):
         try:
             stock = yf.Ticker(t)
             cal = stock.calendar
-            if not cal.empty and 'Earnings Date' in cal.index:
-                earn_date = cal.loc['Earnings Date'][0]
+            if 'Earnings Date' in cal and not cal['Earnings Date'].empty:
+                earn_date = cal['Earnings Date'][0]
                 if datetime.now() < earn_date < datetime.now() + timedelta(days=30):
                     upcoming.append(t)
         except:
@@ -296,7 +294,7 @@ def get_upcoming_earnings(tickers):
 
 # App
 st.title('Advanced Quant Stock & Options Analyzer')
-st.markdown('Fair prices z NYU 2025 data, earnings beat probs z historical + factors. Live data.')
+st.markdown('Fair prices from NYU 2025 data, earnings beat probs from historical + factors. Live data.')
 
 # Single ticker
 ticker = st.text_input('Ticker:')
@@ -313,14 +311,21 @@ if ticker:
     options_df = get_options_value(ticker.upper())
     if not options_df.empty:
         st.write('Options:')
-        st.dataframe(options_df.sort_values('Value %', ascending=False))
+        def color_diff(val):
+            return 'background-color: green' if val > 0 else 'background-color: red'
+        styled_options = options_df.sort_values('Value %', ascending=False).style.map(color_diff, subset=['Value %'])
+        st.dataframe(styled_options, width='stretch')
 
 # All stocks
 if st.button('Load & Sort All (may take time)'):
     with st.spinner('Processing...'):
         tickers = get_index_tickers()
-        results = [calculate_fair_price(t) for t in tickers if calculate_fair_price(t)]
-        df = pd.DataFrame([r for r in results if r]).sort_values('Diff %', ascending=False)
+        results = []
+        for t in tickers:
+            res = calculate_fair_price(t)
+            if res:
+                results.append(res)
+        df = pd.DataFrame(results).sort_values('Diff %', ascending=False)
 
         for idx, row in df.iterrows():
             beat_prob = row['Beat Prob (1-5)']
@@ -334,23 +339,30 @@ if st.button('Load & Sort All (may take time)'):
         styled_df = df.style.map(color_diff, subset=['Diff %'])
         st.dataframe(styled_df, width='stretch')
 
-        # Earnings filter
+        # Upcoming earnings
         st.subheader('Upcoming Earnings Filter')
         upcoming = get_upcoming_earnings(tickers)
         if upcoming:
             up_df = df[df['Ticker'].isin(upcoming)].sort_values('Beat Prob (1-5)', ascending=False)
-            st.dataframe(up_df)
+            styled_up = up_df.style.map(color_diff, subset=['Diff %'])
+            st.dataframe(styled_up, width='stretch')
         else:
             st.write('No upcoming earnings found.')
 
-        # Options all
-        options_all = pd.concat([get_options_value(t) for t in tickers[:50] if not get_options_value(t).empty])  # Limit
-        if not options_all.empty:
+        # Options
+        options_all = []
+        for t in tickers[:50]:
+            opt_df = get_options_value(t)
+            if not opt_df.empty:
+                options_all.append(opt_df)
+        if options_all:
             st.subheader('Top Value Options')
             option_type = st.selectbox('Type:', ['ALL', 'CALL', 'PUT'])
             min_value = st.slider('Min Value %:', 0, 100, 10)
-            filtered = options_all if option_type == 'ALL' else options_all[options_all['Type'] == option_type]
+            options_df = pd.concat(options_all)
+            filtered = options_df if option_type == 'ALL' else options_df[options_df['Type'] == option_type]
             filtered = filtered[filtered['Value %'] >= min_value].sort_values('Value %', ascending=False)
-            st.dataframe(filtered.style.map(color_diff, subset=['Value %']), width='stretch')
+            styled_filtered = filtered.style.map(color_diff, subset=['Value %'])
+            st.dataframe(styled_filtered, width='stretch')
 
-st.markdown(f'Updated: {datetime.now().strftime("%Y-%m-%d %H:%M")}')
+st.markdown(f'Updated: {datetime.now().strftime("%Y-%m-%d %H:%M")}') 
