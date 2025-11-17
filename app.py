@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -397,3 +398,4 @@ if st.button('Load & Sort All (may take time)'):
                 st.dataframe(filtered, width='stretch')
 
 st.markdown(f'Updated: {datetime.now().strftime("%Y-%m-%d %H:%M")}') 
+```
