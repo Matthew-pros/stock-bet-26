@@ -6,41 +6,22 @@ from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from scipy.stats import norm
 import numpy as np
-from io import StringIO
 import concurrent.futures
 
 # -----------------------------------------------------------------------------
-# 1. PAGE CONFIG & STYLING
+# 1. CONFIG & STYLING
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Quant Analyzer", layout="wide")
+st.set_page_config(page_title="Quant Stock Analyzer", layout="wide")
 
-# Dark theme CSS
 st.markdown(
     """
     <style>
-    .main {
-        background-color: #0e1117;
-        color: #ffffff;
-    }
-    .stButton > button {
-        width: 100%;
-        border-radius: 5px;
-        height: 3em;
-        background-color: #262730;
-        color: white;
-        border: 1px solid #4e4f57;
-    }
-    .stButton > button:hover {
-        border-color: #3b82f6;
-        color: #3b82f6;
-    }
-    h1, h2, h3 {
-        color: #ffffff;
-    }
-    /* Highlight the dataframe */
-    [data-testid="stDataFrame"] {
-        border: 1px solid #3b82f6;
-    }
+    .main { background-color: #0e1117; color: #ffffff; }
+    .stButton > button { width: 100%; border-radius: 5px; height: 3em; background-color: #1f2937; color: white; border: 1px solid #3b82f6; }
+    .stButton > button:hover { background-color: #3b82f6; color: white; }
+    .stTextInput > div > div > input { background-color: #1f2937; color: white; }
+    h1, h2, h3 { color: #ffffff; }
+    [data-testid="stDataFrame"] { border: 1px solid #4e4f57; }
     </style>
     """,
     unsafe_allow_html=True
@@ -72,335 +53,356 @@ sector_mapping = {
 }
 
 # -----------------------------------------------------------------------------
-# 3. HELPER FUNCTIONS (Data Fetching)
+# 3. TICKER FETCHING (Robust Methods)
 # -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    # Wikipedia is more reliable than slickcharts for scraping
     try:
-        response = requests.get('https://www.slickcharts.com/sp500', headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tickers = [row.find_all('td')[2].find('a').text for row in soup.find('table', class_='table').find_all('tr')[1:]]
-        return list(set(tickers))
-    except Exception:
-        # Fallback
-        return ['AAPL','MSFT','GOOGL','AMZN','NVDA','TSLA','META','BRK.B','LLY','V']
+        table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
+        df = table[0]
+        tickers = df['Symbol'].tolist()
+        return [t.replace('.', '-') for t in tickers] # Fix BRK.B -> BRK-B for Yahoo
+    except Exception as e:
+        st.error(f"S&P 500 Error: {e}")
+        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META', 'BRK-B']
 
 @st.cache_data(ttl=86400)
 def get_nasdaq_tickers():
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
-        response = requests.get('https://www.slickcharts.com/nasdaq100', headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        tickers = [row.find_all('td')[2].find('a').text for row in soup.find('table', class_='table').find_all('tr')[1:]]
-        return list(set(tickers))
-    except Exception:
-        return ['AAPL','MSFT','AMZN','NVDA','META','AVGO','GOOGL','COST','TSLA','AMD']
+        table = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100')
+        df = table[4] # Typically index 4 is the components table
+        if 'Ticker' not in df.columns and 'Symbol' in df.columns:
+            tickers = df['Symbol'].tolist()
+        else:
+            tickers = df['Ticker'].tolist()
+        return [t.replace('.', '-') for t in tickers]
+    except Exception as e:
+        # Backup method if table index changes
+        try:
+            for t in pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100'):
+                if 'Ticker' in t.columns:
+                    return [x.replace('.', '-') for x in t['Ticker'].tolist()]
+        except:
+            pass
+        st.error(f"NASDAQ Error: {e}")
+        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'META', 'AVGO', 'GOOGL', 'COST', 'TSLA', 'AMD']
 
 @st.cache_data(ttl=86400)
 def get_hang_seng_tickers():
-    # Simplified manual list for reliability if scrape fails
-    return ['0005.HK','0700.HK','0939.HK','0941.HK','1299.HK','9988.HK','3690.HK','0388.HK','0001.HK']
+    try:
+        # Wikipedia for Hang Seng
+        table = pd.read_html('https://en.wikipedia.org/wiki/Hang_Seng_Index')
+        df = table[2] # Constituents table
+        tickers = []
+        for code in df['Ticker'].astype(str):
+            # Format code to 4 digits and add .HK (e.g., 5 -> 0005.HK)
+            clean_code = code.strip().zfill(4)
+            tickers.append(f"{clean_code}.HK")
+        return list(set(tickers))
+    except Exception:
+        return ['0005.HK','0700.HK','0939.HK','0941.HK','1299.HK','9988.HK','3690.HK','0388.HK','0001.HK']
 
 @st.cache_data(ttl=86400)
 def get_nikkei_tickers():
-    # Simplified manual list
-    return ['7203.T','6758.T','9984.T','8035.T','9983.T','6861.T','4063.T','6098.T','6501.T']
+    try:
+        # Getting Nikkei 225 from Wikipedia
+        table = pd.read_html('https://en.wikipedia.org/wiki/Nikkei_225')
+        df = table[3] # Constituents
+        tickers = []
+        for code in df['Symbol'].astype(str):
+            tickers.append(f"{code}.T")
+        return list(set(tickers))
+    except Exception:
+        return ['7203.T','6758.T','9984.T','8035.T','9983.T','6861.T','4063.T','6098.T','6501.T']
 
-@st.cache_data(ttl=86400)
-def get_all_tickers():
-    return list(set(get_sp500_tickers() + get_nasdaq_tickers()))
+# -----------------------------------------------------------------------------
+# 4. CORE ANALYSIS
+# -----------------------------------------------------------------------------
 
 def calculate_fair_price(ticker):
-    """Main logic to calculate valuation for a single ticker."""
     try:
         stock = yf.Ticker(ticker)
-        # Fast info retrieval
+        # Using fast_info or info, prioritizing speed but ensuring data presence
         info = stock.info
         
         if not info or 'regularMarketPrice' not in info:
             return None
 
-        current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
-        if current_price == 0: return None
+        # --- Gather All Metrics (from original code) ---
+        metrics = {
+            'Ticker': ticker,
+            'Sector': info.get('sector', 'Other'),
+            'Price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
+            'Market Cap': info.get('marketCap', 0),
+            'PE': info.get('trailingPE', 0),
+            'Fwd PE': info.get('forwardPE', 0),
+            'PEG': info.get('pegRatio', 0),
+            'PS': info.get('priceToSalesTrailing12Months', 0),
+            'PB': info.get('priceToBook', 0),
+            'Beta': info.get('beta', 0),
+            'EPS': info.get('trailingEps', 0),
+            'ROE': info.get('returnOnEquity', 0),
+            'Profit Margin': info.get('profitMargins', 0),
+            'Gross Margin': info.get('grossMargins', 0),
+            'Debt/Equity': info.get('debtToEquity', 0),
+            'Rev Growth': info.get('revenueGrowth', 0),
+            'Earnings Growth': info.get('earningsGrowth', 0),
+            'Free Cashflow': info.get('freeCashflow', 0),
+            'Target Price': info.get('targetMeanPrice', 0),
+            'Short Float': info.get('shortPercentOfFloat', 0),
+            'Div Yield': info.get('dividendYield', 0),
+            '52w High': info.get('fiftyTwoWeekHigh', 0),
+            '52w Low': info.get('fiftyTwoWeekLow', 0),
+        }
 
-        # Extract metrics safely
-        sector = info.get('sector', 'Other')
+        # --- Fair Value Logic ---
+        sector = metrics['Sector']
         mapped_sector = sector_mapping.get(sector, 'Other')
         multiples = sector_multiples.get(mapped_sector, sector_multiples['Other'])
-        
-        eps = info.get('trailingEps', 0) or 0
-        forward_eps = info.get('forwardEps', 0) or 0
+
+        # Calculations
+        eps = metrics['EPS'] or 0
+        fwd_eps = info.get('forwardEps', 0) or 0
         bvps = info.get('bookValue', 0) or 0
-        revenue_ps = info.get('revenuePerShare', 0) or 0
+        rev_ps = info.get('revenuePerShare', 0) or 0
+        ebitda = info.get('ebitda', 0) or 0
         shares = info.get('sharesOutstanding', 1)
-        ebitda = info.get('ebitda', 0) or 0 # yfinance key might be lower case in some versions
-        
-        # Fallback for debt calculation
-        total_debt = info.get('totalDebt', 0) or 0
-        total_cash = info.get('totalCash', 0) or 0
-        net_debt = total_debt - total_cash
-        
+        net_debt = (info.get('totalDebt', 0) or 0) - (info.get('totalCash', 0) or 0)
+
         # Valuation Models
-        fair_current_pe = eps * multiples['current_pe'] if eps > 0 else 0
-        fair_forward_pe = forward_eps * multiples['forward_pe'] if forward_eps > 0 else 0
+        fair_pe = eps * multiples['current_pe'] if eps > 0 else 0
+        fair_fwd_pe = fwd_eps * multiples['forward_pe'] if fwd_eps > 0 else 0
         fair_pb = bvps * multiples['pb'] if bvps > 0 else 0
-        fair_ps = revenue_ps * multiples['ps']
+        fair_ps = rev_ps * multiples['ps']
+        fair_evebitda = max(0, (ebitda * multiples['evebitda'] - net_debt) / shares) if shares > 0 else 0
         
-        fair_evebitda = 0
-        if shares > 0 and ebitda > 0:
-            fair_evebitda = (ebitda * multiples['evebitda'] - net_debt) / shares
-            if fair_evebitda < 0: fair_evebitda = 0
-
-        # DDM Approximation
-        roe = info.get('returnOnEquity', 0) or 0.1
+        # DDM
+        cost_equity = 0.03 + (metrics['Beta'] or 1) * 0.06
         payout = info.get('payoutRatio', 0) or 0
-        beta = info.get('beta', 1)
-        cost_equity = 0.03 + beta * 0.06
-        growth = (1 - payout) * roe
-        if growth <= 0: growth = multiples['growth']
+        growth_rate = (1 - payout) * (metrics['ROE'] or 0.1)
+        if growth_rate <= 0: growth_rate = multiples['growth']
         
-        if cost_equity > growth > 0 and eps > 0:
-            fair_ddm = (eps * (1 - payout)) / (cost_equity - growth)
+        fair_ddm = 0
+        if cost_equity > growth_rate > 0 and eps > 0:
+            fair_ddm = (eps * (1 - payout)) / (cost_equity - growth_rate)
         else:
-            fair_ddm = (fair_current_pe + fair_forward_pe) / 2
+            fair_ddm = (fair_pe + fair_fwd_pe) / 2
 
-        # Weighted Average Fair Value
-        weights = [0.3, 0.25, 0.15, 0.15, 0.15, 0.05] # PE, FPE, PB, PS, EV, DDM
-        components = [fair_current_pe, fair_forward_pe, fair_pb, fair_ps, fair_evebitda, fair_ddm]
+        # Weighted Fair Value
+        vals = [fair_pe, fair_fwd_pe, fair_pb, fair_ps, fair_evebitda, fair_ddm]
+        weights = [0.3, 0.25, 0.15, 0.15, 0.15, 0.05]
         
-        # Only use non-zero components
-        valid_components = []
+        valid_vals = []
         valid_weights = []
-        for c, w in zip(components, weights):
-            if c > 0:
-                valid_components.append(c)
+        for v, w in zip(vals, weights):
+            if v > 0:
+                valid_vals.append(v)
                 valid_weights.append(w)
         
-        if not valid_components:
+        if not valid_vals:
             return None
-
-        fair_price = np.average(valid_components, weights=valid_weights)
+            
+        fair_price = np.average(valid_vals, weights=valid_weights)
         
         # PEG Adjustment
-        peg = info.get('pegRatio', 0)
-        if peg > 0 and multiples['peg'] > 0:
-            # Mild adjustment based on PEG
-            fair_price = fair_price / (multiples['peg'] if multiples['peg'] > 1 else 1)
+        if multiples['peg'] > 0 and metrics['PEG'] and metrics['PEG'] > 0:
+             fair_price /= (multiples['peg'] if multiples['peg'] > 1.2 else 1)
 
-        # Final Sanity Check & Margin of Safety
-        fair_price = fair_price * 0.95 # 5% Margin of safety
+        # Margin of Safety
+        fair_price *= 0.95
         
-        diff_nominal = fair_price - current_price
-        diff_percent = ((fair_price - current_price) / current_price) * 100
+        current_price = metrics['Price']
+        diff_pct = ((fair_price - current_price) / current_price) * 100 if current_price else 0
 
-        # Basic Probability Logic (Simplified for speed)
-        beat_prob = 3
-        if info.get('earningsGrowth', 0) > 0.1: beat_prob += 1
-        if info.get('shortPercentOfFloat', 0) < 0.05: beat_prob += 1
+        metrics['Fair Value'] = round(fair_price, 2)
+        metrics['Diff %'] = round(diff_pct, 2)
         
-        miss_prob = 2
-        if info.get('earningsGrowth', 0) < 0: miss_prob += 1
+        # Earnings Beat Probability
+        score = 0
+        if (metrics['Earnings Growth'] or 0) > 0.1: score += 1
+        if (metrics['Short Float'] or 0) < 0.05: score += 1
+        if (metrics['Rev Growth'] or 0) > 0.05: score += 1
+        beat_prob = min(max(score + 3, 1), 5)
+        metrics['Beat Prob'] = '🟢' * beat_prob
+        
+        return metrics
 
-        return {
-            'Ticker': ticker,
-            'Price': round(current_price, 2),
-            'Fair Value': round(fair_price, 2),
-            'Diff %': round(diff_percent, 2),
-            'Action': 'BUY' if diff_percent > 15 else ('SELL' if diff_percent < -15 else 'HOLD'),
-            'Sector': sector,
-            'PE': round(info.get('trailingPE', 0) or 0, 2),
-            'Fwd PE': round(info.get('forwardPE', 0) or 0, 2),
-            'PEG': round(info.get('pegRatio', 0) or 0, 2),
-            'Beta': round(info.get('beta', 0) or 0, 2),
-            'Beat Prob': '🟢' * min(beat_prob, 5),
-            'Miss Prob': '🔴' * min(miss_prob, 5)
-        }
     except Exception:
         return None
 
-def black_scholes(S, K, T, r, sigma, option_type='call'):
-    if T <= 0 or sigma <= 0: return 0
-    d1 = (np.log(S / K) + (r + 0.5 * sigma**2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    if option_type == 'call':
-        return S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
-    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
-
 def get_options_single(ticker):
-    """Get options for a single ticker only when requested."""
     try:
         stock = yf.Ticker(ticker)
         current = stock.info.get('currentPrice', 0)
         if current == 0: return pd.DataFrame()
         
-        # Estimate volatility from history
         hist = stock.history(period="3mo")
-        sigma = np.std(hist['Close'].pct_change()) * np.sqrt(252)
+        sigma = np.std(hist['Close'].pct_change()) * np.sqrt(252) if len(hist) > 1 else 0.5
         
         options_data = []
         exps = stock.options
         if not exps: return pd.DataFrame()
         
-        # Look at first expiration
-        chain = stock.option_chain(exps[0])
-        exp_date = datetime.strptime(exps[0], '%Y-%m-%d')
-        T = (exp_date - datetime.now()).days / 365
+        # Get first expiration that is at least 7 days out for better data
+        exp_to_use = exps[0]
+        for e in exps:
+            days = (datetime.strptime(e, '%Y-%m-%d') - datetime.now()).days
+            if days > 5:
+                exp_to_use = e
+                break
+
+        chain = stock.option_chain(exp_to_use)
+        T = (datetime.strptime(exp_to_use, '%Y-%m-%d') - datetime.now()).days / 365
         if T <= 0: T = 0.001
 
-        for df, opt_type in [(chain.calls, 'call'), (chain.puts, 'put')]:
-            # Filter for near-the-money to save processing
-            df = df[(df['strike'] > current * 0.8) & (df['strike'] < current * 1.2)]
-            
+        for df, typ in [(chain.calls, 'call'), (chain.puts, 'put')]:
+             # Filter range
+            df = df[(df['strike'] > current * 0.75) & (df['strike'] < current * 1.25)]
             for _, row in df.iterrows():
                 K = row['strike']
                 market = row['lastPrice']
-                theo = black_scholes(current, K, T, 0.04, sigma, opt_type)
-                diff_pct = ((theo - market) / market * 100) if market > 0 else 0
+                if market < 0.05: continue
                 
-                if market > 0.1: # Filter out penny options
+                d1 = (np.log(current/K) + (0.04 + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
+                d2 = d1 - sigma*np.sqrt(T)
+                if typ == 'call':
+                    theo = current*norm.cdf(d1) - K*np.exp(-0.04*T)*norm.cdf(d2)
+                else:
+                    theo = K*np.exp(-0.04*T)*norm.cdf(-d2) - current*norm.cdf(-d1)
+                
+                val_diff = (theo - market)/market * 100
+                if val_diff > 10: # Filter clutter
                     options_data.append({
-                        'Type': opt_type.upper(),
-                        'Strike': K,
-                        'Exp': exps[0],
-                        'Market': market,
-                        'Theo': round(theo, 2),
-                        'Value %': round(diff_pct, 1)
+                        'Type': typ.upper(), 'Strike': K, 'Exp': exp_to_use,
+                        'Market': market, 'Theo': round(theo, 2), 'Value %': round(val_diff, 1)
                     })
-        return pd.DataFrame(options_data).sort_values('Value %', ascending=False).head(20)
+        return pd.DataFrame(options_data).sort_values('Value %', ascending=False).head(15)
     except Exception:
         return pd.DataFrame()
 
 # -----------------------------------------------------------------------------
-# 4. MAIN APP LOGIC
+# 5. APP INTERFACE
 # -----------------------------------------------------------------------------
 
-st.title('Advanced Quant Stock Analyzer')
-st.markdown('**Instructions:** Click a button below to load data. Use column headers to sort. Use the text box to analyze specific options.')
+st.title('Advanced Quant Analyzer - Full Market')
+st.markdown('Loads real-time data from Yahoo Finance. **Note:** Loading 500+ tickers takes time. Please wait for the progress bar.')
 
-# Session State Initialization
-if 'stock_data' not in st.session_state:
-    st.session_state['stock_data'] = pd.DataFrame()
-if 'active_list' not in st.session_state:
-    st.session_state['active_list'] = ""
+# Session State
+if 'stock_df' not in st.session_state:
+    st.session_state['stock_df'] = pd.DataFrame()
+if 'list_name' not in st.session_state:
+    st.session_state['list_name'] = ""
 
-# --- Input Section (Single Ticker) ---
-with st.expander("Single Ticker Deep Dive", expanded=False):
-    single_ticker = st.text_input('Enter Ticker (e.g., NVDA):').upper()
-    if st.button("Analyze Single Ticker"):
-        if single_ticker:
-            with st.spinner(f"Analyzing {single_ticker}..."):
-                res = calculate_fair_price(single_ticker)
-                if res:
-                    st.dataframe(pd.DataFrame([res]))
-                
-                st.subheader("Top Value Options")
-                opt_df = get_options_single(single_ticker)
-                if not opt_df.empty:
-                    st.dataframe(opt_df, use_container_width=True)
+# --- Single Ticker ---
+with st.expander("🔎 Single Ticker Analysis", expanded=False):
+    t_in = st.text_input("Ticker (e.g. TSLA):").upper()
+    if st.button("Analyze One"):
+        if t_in:
+            with st.spinner('Calculating...'):
+                data = calculate_fair_price(t_in)
+                if data:
+                    st.dataframe(pd.DataFrame([data]), use_container_width=True)
+                    st.subheader("Options Value")
+                    st.dataframe(get_options_single(t_in), use_container_width=True)
                 else:
-                    st.warning("No options data found.")
+                    st.error("Ticker not found or no data.")
 
 st.divider()
 
-# --- Bulk Data Loaders ---
-st.subheader("Market Scanners")
-
-col1, col2, col3, col4, col5 = st.columns(5)
-
-def load_data(ticker_list, name):
-    """Handles the bulk loading with progress bar and threading."""
-    st.session_state['active_list'] = name
-    progress_bar = st.progress(0)
-    status_text = st.empty()
+# --- Bulk Loader Function ---
+def run_bulk_analysis(ticker_list, list_label):
+    st.session_state['list_name'] = list_label
+    st.session_state['stock_df'] = pd.DataFrame() # Clear previous
     
+    prog_bar = st.progress(0)
+    status_area = st.empty()
     results = []
+    
+    # Chunking to prevent overwhelming user UI, but processing all
     total = len(ticker_list)
     
-    # Multithreading for speed
+    # Using ThreadPool for speed - set to 20 workers to be safe with Yahoo API
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
         future_to_ticker = {executor.submit(calculate_fair_price, t): t for t in ticker_list}
         
-        for i, future in enumerate(concurrent.futures.as_completed(future_to_ticker)):
-            res = future.result()
-            if res:
-                results.append(res)
-            
-            # Update progress bar
-            progress = (i + 1) / total
-            progress_bar.progress(progress)
-            status_text.text(f"Processed {i+1}/{total} tickers...")
-    
-    progress_bar.empty()
-    status_text.empty()
+        completed = 0
+        for future in concurrent.futures.as_completed(future_to_ticker):
+            data = future.result()
+            if data:
+                results.append(data)
+            completed += 1
+            # Update UI every 5 tickers to reduce lag
+            if completed % 5 == 0 or completed == total:
+                prog_bar.progress(completed / total)
+                status_area.text(f"Scanning {completed}/{total} stocks... ({len(results)} successful)")
+
+    prog_bar.empty()
+    status_area.empty()
     
     if results:
         df = pd.DataFrame(results)
-        # Ensure consistent column order
-        cols = ['Ticker', 'Price', 'Fair Value', 'Diff %', 'Action', 'Sector', 'PE', 'PEG', 'Beat Prob']
-        # Filter for existing columns only
-        cols = [c for c in cols if c in df.columns] 
-        st.session_state['stock_data'] = df[cols].sort_values('Diff %', ascending=False)
+        # Reorder columns nicely: Key info first, then the rest
+        priority = ['Ticker', 'Price', 'Fair Value', 'Diff %', 'Beat Prob', 'Sector', 'PE', 'PEG']
+        other_cols = [c for c in df.columns if c not in priority]
+        final_cols = priority + other_cols
+        
+        st.session_state['stock_df'] = df[final_cols].sort_values('Diff %', ascending=False)
     else:
-        st.error("No data returned. Check connection.")
+        st.error("No data loaded. Yahoo Finance might be blocking requests momentarily.")
 
-# Buttons
-with col1:
-    if st.button('Load S&P500'):
-        load_data(get_sp500_tickers(), "S&P 500")
-with col2:
-    if st.button('Load NASDAQ'):
-        load_data(get_nasdaq_tickers(), "NASDAQ 100")
-with col3:
-    if st.button('Load Hang Seng'):
-        load_data(get_hang_seng_tickers(), "Hang Seng")
-with col4:
-    if st.button('Load Nikkei'):
-        load_data(get_nikkei_tickers(), "Nikkei 225")
-with col5:
-    if st.button('Clear Data'):
-        st.session_state['stock_data'] = pd.DataFrame()
-        st.session_state['active_list'] = ""
+# --- Buttons ---
+c1, c2, c3, c4, c5 = st.columns(5)
+with c1:
+    if st.button(f"Load S&P 500"):
+        ts = get_sp500_tickers()
+        st.info(f"Found {len(ts)} tickers. Starting scan...")
+        run_bulk_analysis(ts, "S&P 500")
+with c2:
+    if st.button("Load NASDAQ 100"):
+        ts = get_nasdaq_tickers()
+        st.info(f"Found {len(ts)} tickers. Starting scan...")
+        run_bulk_analysis(ts, "NASDAQ 100")
+with c3:
+    if st.button("Load Hang Seng"):
+        ts = get_hang_seng_tickers()
+        run_bulk_analysis(ts, "Hang Seng")
+with c4:
+    if st.button("Load Nikkei 225"):
+        ts = get_nikkei_tickers()
+        st.info(f"Found {len(ts)} tickers. Starting scan...")
+        run_bulk_analysis(ts, "Nikkei 225")
+with c5:
+    if st.button("Load Custom"):
+        # Example small list
+        custom = ['NVDA','AAPL','MSFT','TSLA','AMD','PLTR','COIN','MSTR']
+        run_bulk_analysis(custom, "Tech Favorites")
 
-# --- Main Data Display ---
-if not st.session_state['stock_data'].empty:
-    st.success(f"Showing results for: {st.session_state['active_list']}")
+# --- Display ---
+if not st.session_state['stock_df'].empty:
+    st.subheader(f"Results: {st.session_state['list_name']} ({len(st.session_state['stock_df'])} stocks)")
     
-    # Filter options
-    filter_col1, filter_col2 = st.columns(2)
-    with filter_col1:
-        min_diff = st.slider("Filter by Min Diff %", -50, 50, 0)
-    with filter_col2:
-        search_term = st.text_input("Filter by Ticker", "")
-
-    # Apply Filters
-    df_display = st.session_state['stock_data'].copy()
-    df_display = df_display[df_display['Diff %'] >= min_diff]
-    if search_term:
-        df_display = df_display[df_display['Ticker'].str.contains(search_term.upper())]
-
-    # Interactive Dataframe (Allows sorting and filtering within the table)
+    # Interactive Data Editor - This allows sorting and filtering in the UI
     st.data_editor(
-        df_display,
+        st.session_state['stock_df'],
         column_config={
             "Diff %": st.column_config.NumberColumn(
                 "Undervalued %",
-                help="Positive means undervalued (Good)",
+                help="Positive Green = Undervalued",
                 format="%.2f %%"
             ),
-            "Price": st.column_config.NumberColumn("Current Price", format="$%.2f"),
-            "Fair Value": st.column_config.NumberColumn("Fair Price", format="$%.2f"),
+            "Market Cap": st.column_config.NumberColumn("Mkt Cap", format="$%d"),
+            "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
+            "Fair Value": st.column_config.NumberColumn("Fair Val", format="$%.2f"),
         },
+        height=600,
         use_container_width=True,
-        hide_index=True,
-        disabled=True # Make read-only
+        disabled=True # Read only
     )
     
-    st.write(f"Count: {len(df_display)} stocks")
-else:
-    st.info("Click a button above to load market data.")
+    # Download button
+    csv = st.session_state['stock_df'].to_csv(index=False).encode('utf-8')
+    st.download_button("Download CSV", data=csv, file_name="stock_analysis.csv", mime="text/csv")
 
-# Footer
-st.markdown("---")
-st.caption(f"Last Updated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+st.markdown(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
