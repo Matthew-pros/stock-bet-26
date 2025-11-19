@@ -2,407 +2,309 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import requests
-from bs4 import BeautifulSoup
-from datetime import datetime, timedelta
+from io import StringIO
+from datetime import datetime
 from scipy.stats import norm
 import numpy as np
 import concurrent.futures
 
 # -----------------------------------------------------------------------------
-# 1. CONFIG & STYLING
+# 1. KONFIGURACE A CSS
 # -----------------------------------------------------------------------------
-st.set_page_config(page_title="Quant Stock Analyzer", layout="wide")
+st.set_page_config(page_title="Pro Quant Analyzer", layout="wide")
 
 st.markdown(
     """
     <style>
     .main { background-color: #0e1117; color: #ffffff; }
-    .stButton > button { width: 100%; border-radius: 5px; height: 3em; background-color: #1f2937; color: white; border: 1px solid #3b82f6; }
+    .stButton > button { 
+        width: 100%; border-radius: 5px; height: 3em; 
+        background-color: #1f2937; color: white; border: 1px solid #3b82f6; 
+    }
     .stButton > button:hover { background-color: #3b82f6; color: white; }
-    .stTextInput > div > div > input { background-color: #1f2937; color: white; }
     h1, h2, h3 { color: #ffffff; }
-    [data-testid="stDataFrame"] { border: 1px solid #4e4f57; }
+    div[data-testid="stDataFrame"] { border: 1px solid #4e4f57; }
     </style>
     """,
     unsafe_allow_html=True
 )
 
 # -----------------------------------------------------------------------------
-# 2. DATA CONSTANTS
+# 2. SPUŠTĚNÍ A STÁHOVÁNÍ TICKERŮ (OPRAVENO)
 # -----------------------------------------------------------------------------
-sector_multiples = {
-    'Technology': {'current_pe': 64.15, 'forward_pe': 86.40, 'pb': 11.12, 'ps': 14.26, 'evebitda': 34.48, 'peg': 1.5, 'growth': 0.15, 'roe': 0.20},
-    'Financial Services': {'current_pe': 35.16, 'forward_pe': 20.64, 'pb': 2.11, 'ps': 5.14, 'evebitda': 62.82, 'peg': 1.29, 'growth': 0.1537, 'roe': 0.1311},
-    'Real Estate': {'current_pe': 44.63, 'forward_pe': 41.45, 'pb': 2.01, 'ps': 6.02, 'evebitda': 20.33, 'peg': 4.75, 'growth': 0.05, 'roe': 0.045},
-    'Consumer Cyclical': {'current_pe': 28.81, 'forward_pe': 22.74, 'pb': 8.43, 'ps': 1.94, 'evebitda': 18.21, 'peg': 10.52, 'growth': 0.08, 'roe': 0.12},
-    'Consumer Defensive': {'current_pe': 23.97, 'forward_pe': 22.81, 'pb': 2.18, 'ps': 1.35, 'evebitda': 11.17, 'peg': 2.04, 'growth': 0.06, 'roe': 0.10},
-    'Healthcare': {'current_pe': 129.64, 'forward_pe': 18.72, 'pb': 5.70, 'ps': 4.84, 'evebitda': 15.37, 'peg': 2.61, 'growth': 0.12, 'roe': 0.15},
-    'Utilities': {'current_pe': 19.19, 'forward_pe': 16.47, 'pb': 1.82, 'ps': 2.97, 'evebitda': 13.44, 'peg': 3.28, 'growth': 0.04, 'roe': 0.08},
-    'Communication Services': {'current_pe': 74.81, 'forward_pe': 46.36, 'pb': 1.62, 'ps': 1.30, 'evebitda': 6.62, 'peg': 3.10, 'growth': 0.10, 'roe': 0.09},
-    'Energy': {'current_pe': 9.09, 'forward_pe': 14.75, 'pb': 1.66, 'ps': 1.39, 'evebitda': 6.70, 'peg': 4.15, 'growth': 0.07, 'roe': 0.14},
-    'Industrials': {'current_pe': 43.07, 'forward_pe': 21.97, 'pb': 4.27, 'ps': 2.87, 'evebitda': 15.35, 'peg': 1.92, 'growth': 0.09, 'roe': 0.13},
-    'Basic Materials': {'current_pe': 15.75, 'forward_pe': 14.53, 'pb': 1.61, 'ps': 0.70, 'evebitda': 7.97, 'peg': 2.55, 'growth': 0.05, 'roe': 0.11},
-    'Other': {'current_pe': 22.0, 'forward_pe': 18.0, 'pb': 3.0, 'ps': 2.76, 'evebitda': 11.0, 'peg': 2.0, 'growth': 0.1, 'roe': 0.12}
-}
 
-sector_mapping = {
-    'Technology': 'Technology', 'Financial Services': 'Financial Services', 'Real Estate': 'Real Estate',
-    'Consumer Cyclical': 'Consumer Cyclical', 'Consumer Defensive': 'Consumer Defensive', 'Healthcare': 'Healthcare',
-    'Utilities': 'Utilities', 'Communication Services': 'Communication Services', 'Energy': 'Energy',
-    'Industrials': 'Industrials', 'Basic Materials': 'Basic Materials', 'Other': 'Other'
+# Hlavička, aby nás weby neblokovaly
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
 }
-
-# -----------------------------------------------------------------------------
-# 3. TICKER FETCHING (Robust Methods)
-# -----------------------------------------------------------------------------
 
 @st.cache_data(ttl=86400)
 def get_sp500_tickers():
-    # Wikipedia is more reliable than slickcharts for scraping
+    """Stáhne S&P 500 (cca 503 tickerů)"""
     try:
-        table = pd.read_html('https://en.wikipedia.org/wiki/List_of_S%26P_500_companies')
-        df = table[0]
+        url = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
+        r = requests.get(url, headers=HEADERS)
+        # Použijeme StringIO pro pandas
+        df = pd.read_html(StringIO(r.text))[0]
         tickers = df['Symbol'].tolist()
-        return [t.replace('.', '-') for t in tickers] # Fix BRK.B -> BRK-B for Yahoo
+        # Nahradit tečku pomlčkou (BRK.B -> BRK-B) pro Yahoo
+        return [t.replace('.', '-') for t in tickers]
     except Exception as e:
-        st.error(f"S&P 500 Error: {e}")
-        return ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'TSLA', 'META', 'BRK-B']
+        st.error(f"Chyba S&P500: {e}")
+        return ['SPY', 'AAPL', 'MSFT'] # Fallback jen při kritické chybě
 
 @st.cache_data(ttl=86400)
 def get_nasdaq_tickers():
+    """Stáhne NASDAQ 100 (cca 101 tickerů)"""
     try:
-        table = pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100')
-        df = table[4] # Typically index 4 is the components table
-        if 'Ticker' not in df.columns and 'Symbol' in df.columns:
-            tickers = df['Symbol'].tolist()
-        else:
-            tickers = df['Ticker'].tolist()
-        return [t.replace('.', '-') for t in tickers]
+        url = "https://en.wikipedia.org/wiki/Nasdaq-100"
+        r = requests.get(url, headers=HEADERS)
+        tables = pd.read_html(StringIO(r.text))
+        
+        # Hledáme tabulku, která má sloupec 'Ticker' nebo 'Symbol'
+        for t in tables:
+            if 'Ticker' in t.columns:
+                return [str(x).replace('.', '-') for x in t['Ticker'].tolist()]
+            elif 'Symbol' in t.columns:
+                return [str(x).replace('.', '-') for x in t['Symbol'].tolist()]
+        return ['QQQ', 'AAPL', 'NVDA']
     except Exception as e:
-        # Backup method if table index changes
-        try:
-            for t in pd.read_html('https://en.wikipedia.org/wiki/Nasdaq-100'):
-                if 'Ticker' in t.columns:
-                    return [x.replace('.', '-') for x in t['Ticker'].tolist()]
-        except:
-            pass
-        st.error(f"NASDAQ Error: {e}")
-        return ['AAPL', 'MSFT', 'AMZN', 'NVDA', 'META', 'AVGO', 'GOOGL', 'COST', 'TSLA', 'AMD']
+        st.error(f"Chyba NASDAQ: {e}")
+        return ['QQQ']
 
 @st.cache_data(ttl=86400)
 def get_hang_seng_tickers():
+    """Stáhne Hang Seng (cca 82 tickerů)"""
     try:
-        # Wikipedia for Hang Seng
-        table = pd.read_html('https://en.wikipedia.org/wiki/Hang_Seng_Index')
-        df = table[2] # Constituents table
-        tickers = []
-        for code in df['Ticker'].astype(str):
-            # Format code to 4 digits and add .HK (e.g., 5 -> 0005.HK)
-            clean_code = code.strip().zfill(4)
-            tickers.append(f"{clean_code}.HK")
-        return list(set(tickers))
-    except Exception:
-        return ['0005.HK','0700.HK','0939.HK','0941.HK','1299.HK','9988.HK','3690.HK','0388.HK','0001.HK']
+        url = "https://en.wikipedia.org/wiki/Hang_Seng_Index"
+        r = requests.get(url, headers=HEADERS)
+        tables = pd.read_html(StringIO(r.text))
+        # Tabulka Constituents bývá obvykle index 2, ale raději hledáme 'Ticker'
+        for t in tables:
+            if 'Ticker' in t.columns and len(t) > 50:
+                raw_tickers = t['Ticker'].astype(str).tolist()
+                # Formátování: 5 -> 0005.HK
+                return [f"{code.strip().zfill(4)}.HK" for code in raw_tickers]
+        return ['0700.HK', '9988.HK']
+    except Exception as e:
+        st.error(f"Chyba Hang Seng: {e}")
+        return ['0700.HK']
 
 @st.cache_data(ttl=86400)
 def get_nikkei_tickers():
+    """Stáhne Nikkei 225 (225 tickerů)"""
     try:
-        # Getting Nikkei 225 from Wikipedia
-        table = pd.read_html('https://en.wikipedia.org/wiki/Nikkei_225')
-        df = table[3] # Constituents
-        tickers = []
-        for code in df['Symbol'].astype(str):
-            tickers.append(f"{code}.T")
-        return list(set(tickers))
-    except Exception:
-        return ['7203.T','6758.T','9984.T','8035.T','9983.T','6861.T','4063.T','6098.T','6501.T']
+        url = "https://en.wikipedia.org/wiki/Nikkei_225"
+        r = requests.get(url, headers=HEADERS)
+        tables = pd.read_html(StringIO(r.text))
+        for t in tables:
+            if 'Symbol' in t.columns and len(t) > 200:
+                return [f"{code}.T" for code in t['Symbol'].astype(str).tolist()]
+        return ['7203.T']
+    except Exception as e:
+        st.error(f"Chyba Nikkei: {e}")
+        return ['7203.T']
 
 # -----------------------------------------------------------------------------
-# 4. CORE ANALYSIS
+# 3. LOGIKA OCENĚNÍ (Valuation)
 # -----------------------------------------------------------------------------
+sector_multiples = {
+    # Data NYU Stern 2025 (zjednodušená pro rychlost)
+    'Technology': {'pe': 35, 'growth': 0.15},
+    'Financial Services': {'pe': 14, 'growth': 0.08},
+    'Healthcare': {'pe': 25, 'growth': 0.10},
+    'Consumer Cyclical': {'pe': 22, 'growth': 0.10},
+    'Communication Services': {'pe': 20, 'growth': 0.12},
+    'Energy': {'pe': 11, 'growth': 0.05},
+    'Industrials': {'pe': 21, 'growth': 0.08},
+    'Other': {'pe': 20, 'growth': 0.08}
+}
 
-def calculate_fair_price(ticker):
+def calculate_metrics(ticker):
+    """Získá data pro jeden ticker - optimalizováno, aby nepadalo."""
     try:
         stock = yf.Ticker(ticker)
-        # Using fast_info or info, prioritizing speed but ensuring data presence
-        info = stock.info
-        
+        # Použijeme 'fast_info' tam kde to jde, pro zbytek 'info'
+        # 'info' je pomalé, ale obsahuje detailní data
+        try:
+            info = stock.info
+        except:
+            return None # Pokud Yahoo nemá data
+
         if not info or 'regularMarketPrice' not in info:
             return None
 
-        # --- Gather All Metrics (from original code) ---
-        metrics = {
-            'Ticker': ticker,
-            'Sector': info.get('sector', 'Other'),
-            'Price': info.get('currentPrice', info.get('regularMarketPrice', 0)),
-            'Market Cap': info.get('marketCap', 0),
-            'PE': info.get('trailingPE', 0),
-            'Fwd PE': info.get('forwardPE', 0),
-            'PEG': info.get('pegRatio', 0),
-            'PS': info.get('priceToSalesTrailing12Months', 0),
-            'PB': info.get('priceToBook', 0),
-            'Beta': info.get('beta', 0),
-            'EPS': info.get('trailingEps', 0),
-            'ROE': info.get('returnOnEquity', 0),
-            'Profit Margin': info.get('profitMargins', 0),
-            'Gross Margin': info.get('grossMargins', 0),
-            'Debt/Equity': info.get('debtToEquity', 0),
-            'Rev Growth': info.get('revenueGrowth', 0),
-            'Earnings Growth': info.get('earningsGrowth', 0),
-            'Free Cashflow': info.get('freeCashflow', 0),
-            'Target Price': info.get('targetMeanPrice', 0),
-            'Short Float': info.get('shortPercentOfFloat', 0),
-            'Div Yield': info.get('dividendYield', 0),
-            '52w High': info.get('fiftyTwoWeekHigh', 0),
-            '52w Low': info.get('fiftyTwoWeekLow', 0),
-        }
+        price = info.get('currentPrice', info.get('regularMarketPrice'))
+        if not price: return None
 
-        # --- Fair Value Logic ---
-        sector = metrics['Sector']
-        mapped_sector = sector_mapping.get(sector, 'Other')
-        multiples = sector_multiples.get(mapped_sector, sector_multiples['Other'])
-
-        # Calculations
-        eps = metrics['EPS'] or 0
-        fwd_eps = info.get('forwardEps', 0) or 0
-        bvps = info.get('bookValue', 0) or 0
-        rev_ps = info.get('revenuePerShare', 0) or 0
-        ebitda = info.get('ebitda', 0) or 0
-        shares = info.get('sharesOutstanding', 1)
-        net_debt = (info.get('totalDebt', 0) or 0) - (info.get('totalCash', 0) or 0)
-
-        # Valuation Models
-        fair_pe = eps * multiples['current_pe'] if eps > 0 else 0
-        fair_fwd_pe = fwd_eps * multiples['forward_pe'] if fwd_eps > 0 else 0
-        fair_pb = bvps * multiples['pb'] if bvps > 0 else 0
-        fair_ps = rev_ps * multiples['ps']
-        fair_evebitda = max(0, (ebitda * multiples['evebitda'] - net_debt) / shares) if shares > 0 else 0
+        # Načtení klíčových parametrů
+        sector = info.get('sector', 'Other')
+        eps = info.get('trailingEps', 0)
+        fwd_eps = info.get('forwardEps', eps)
+        pe = info.get('trailingPE', 0)
+        peg = info.get('pegRatio', 0)
+        pb = info.get('priceToBook', 0)
+        beta = info.get('beta', 1)
+        mkt_cap = info.get('marketCap', 0)
         
-        # DDM
-        cost_equity = 0.03 + (metrics['Beta'] or 1) * 0.06
-        payout = info.get('payoutRatio', 0) or 0
-        growth_rate = (1 - payout) * (metrics['ROE'] or 0.1)
-        if growth_rate <= 0: growth_rate = multiples['growth']
+        # --- Jednoduchý Fair Value Model ---
+        # Používáme kombinaci násobků sektoru a vlastních dat
+        mult = sector_multiples.get(sector, sector_multiples['Other'])
         
-        fair_ddm = 0
-        if cost_equity > growth_rate > 0 and eps > 0:
-            fair_ddm = (eps * (1 - payout)) / (cost_equity - growth_rate)
+        # 1. PE Model
+        fair_pe_val = (eps if eps else fwd_eps) * mult['pe']
+        
+        # 2. PEG Model (pokud máme growth)
+        growth = info.get('earningsGrowth', mult['growth'])
+        if growth is None: growth = 0.05
+        fair_peg_val = (eps if eps else 1) * (growth * 100) 
+        
+        # Průměr (vážený)
+        if fair_pe_val > 0 and fair_peg_val > 0:
+            fair_value = (fair_pe_val * 0.7) + (fair_peg_val * 0.3)
+        elif fair_pe_val > 0:
+            fair_value = fair_pe_val
         else:
-            fair_ddm = (fair_pe + fair_fwd_pe) / 2
-
-        # Weighted Fair Value
-        vals = [fair_pe, fair_fwd_pe, fair_pb, fair_ps, fair_evebitda, fair_ddm]
-        weights = [0.3, 0.25, 0.15, 0.15, 0.15, 0.05]
-        
-        valid_vals = []
-        valid_weights = []
-        for v, w in zip(vals, weights):
-            if v > 0:
-                valid_vals.append(v)
-                valid_weights.append(w)
-        
-        if not valid_vals:
-            return None
+            fair_value = price # Nelze spočítat, předpokládáme tržní cenu
             
-        fair_price = np.average(valid_vals, weights=valid_weights)
+        diff_pct = ((fair_value - price) / price) * 100
         
-        # PEG Adjustment
-        if multiples['peg'] > 0 and metrics['PEG'] and metrics['PEG'] > 0:
-             fair_price /= (multiples['peg'] if multiples['peg'] > 1.2 else 1)
-
-        # Margin of Safety
-        fair_price *= 0.95
-        
-        current_price = metrics['Price']
-        diff_pct = ((fair_price - current_price) / current_price) * 100 if current_price else 0
-
-        metrics['Fair Value'] = round(fair_price, 2)
-        metrics['Diff %'] = round(diff_pct, 2)
-        
-        # Earnings Beat Probability
-        score = 0
-        if (metrics['Earnings Growth'] or 0) > 0.1: score += 1
-        if (metrics['Short Float'] or 0) < 0.05: score += 1
-        if (metrics['Rev Growth'] or 0) > 0.05: score += 1
-        beat_prob = min(max(score + 3, 1), 5)
-        metrics['Beat Prob'] = '🟢' * beat_prob
-        
-        return metrics
+        return {
+            'Ticker': ticker,
+            'Price': price,
+            'Fair Value': round(fair_value, 2),
+            'Diff %': round(diff_pct, 2),
+            'Sector': sector,
+            'PE': round(pe, 2) if pe else None,
+            'Fwd PE': round(info.get('forwardPE', 0), 2),
+            'PEG': peg,
+            'PB': round(pb, 2) if pb else None,
+            'EPS': eps,
+            'Beta': round(beta, 2) if beta else None,
+            'Mkt Cap': mkt_cap,
+            'Profit Margin': info.get('profitMargins'),
+            'Debt/Equity': info.get('debtToEquity'),
+            'Free Cashflow': info.get('freeCashflow')
+        }
 
     except Exception:
         return None
 
-def get_options_single(ticker):
-    try:
-        stock = yf.Ticker(ticker)
-        current = stock.info.get('currentPrice', 0)
-        if current == 0: return pd.DataFrame()
-        
-        hist = stock.history(period="3mo")
-        sigma = np.std(hist['Close'].pct_change()) * np.sqrt(252) if len(hist) > 1 else 0.5
-        
-        options_data = []
-        exps = stock.options
-        if not exps: return pd.DataFrame()
-        
-        # Get first expiration that is at least 7 days out for better data
-        exp_to_use = exps[0]
-        for e in exps:
-            days = (datetime.strptime(e, '%Y-%m-%d') - datetime.now()).days
-            if days > 5:
-                exp_to_use = e
-                break
-
-        chain = stock.option_chain(exp_to_use)
-        T = (datetime.strptime(exp_to_use, '%Y-%m-%d') - datetime.now()).days / 365
-        if T <= 0: T = 0.001
-
-        for df, typ in [(chain.calls, 'call'), (chain.puts, 'put')]:
-             # Filter range
-            df = df[(df['strike'] > current * 0.75) & (df['strike'] < current * 1.25)]
-            for _, row in df.iterrows():
-                K = row['strike']
-                market = row['lastPrice']
-                if market < 0.05: continue
-                
-                d1 = (np.log(current/K) + (0.04 + 0.5*sigma**2)*T) / (sigma*np.sqrt(T))
-                d2 = d1 - sigma*np.sqrt(T)
-                if typ == 'call':
-                    theo = current*norm.cdf(d1) - K*np.exp(-0.04*T)*norm.cdf(d2)
-                else:
-                    theo = K*np.exp(-0.04*T)*norm.cdf(-d2) - current*norm.cdf(-d1)
-                
-                val_diff = (theo - market)/market * 100
-                if val_diff > 10: # Filter clutter
-                    options_data.append({
-                        'Type': typ.upper(), 'Strike': K, 'Exp': exp_to_use,
-                        'Market': market, 'Theo': round(theo, 2), 'Value %': round(val_diff, 1)
-                    })
-        return pd.DataFrame(options_data).sort_values('Value %', ascending=False).head(15)
-    except Exception:
-        return pd.DataFrame()
-
 # -----------------------------------------------------------------------------
-# 5. APP INTERFACE
+# 4. LOGIKA APLIKACE
 # -----------------------------------------------------------------------------
 
-st.title('Advanced Quant Analyzer - Full Market')
-st.markdown('Loads real-time data from Yahoo Finance. **Note:** Loading 500+ tickers takes time. Please wait for the progress bar.')
+st.title('Advanced Stock Analyzer (Fixed)')
+st.markdown("Data loaded via Wikipedia & Yahoo Finance. **Please allow time for full lists (500+ items) to load.**")
 
-# Session State
-if 'stock_df' not in st.session_state:
-    st.session_state['stock_df'] = pd.DataFrame()
-if 'list_name' not in st.session_state:
-    st.session_state['list_name'] = ""
+# Stav aplikace (aby data nemizela)
+if 'data_result' not in st.session_state:
+    st.session_state['data_result'] = pd.DataFrame()
+if 'active_index' not in st.session_state:
+    st.session_state['active_index'] = ""
 
-# --- Single Ticker ---
-with st.expander("🔎 Single Ticker Analysis", expanded=False):
-    t_in = st.text_input("Ticker (e.g. TSLA):").upper()
-    if st.button("Analyze One"):
-        if t_in:
-            with st.spinner('Calculating...'):
-                data = calculate_fair_price(t_in)
-                if data:
-                    st.dataframe(pd.DataFrame([data]), use_container_width=True)
-                    st.subheader("Options Value")
-                    st.dataframe(get_options_single(t_in), use_container_width=True)
-                else:
-                    st.error("Ticker not found or no data.")
-
-st.divider()
-
-# --- Bulk Loader Function ---
-def run_bulk_analysis(ticker_list, list_label):
-    st.session_state['list_name'] = list_label
-    st.session_state['stock_df'] = pd.DataFrame() # Clear previous
+# Funkce pro hromadné načtení
+def load_market_data(ticker_func, index_name):
+    st.session_state['active_index'] = index_name
+    st.session_state['data_result'] = pd.DataFrame() # Reset
     
-    prog_bar = st.progress(0)
-    status_area = st.empty()
+    with st.spinner(f"Načítám seznam tickerů pro {index_name}..."):
+        tickers = ticker_func()
+    
+    if len(tickers) < 10:
+        st.error(f"Pozor: Načteno pouze {len(tickers)} symbolů. Pravděpodobně chyba scrapingu.")
+    else:
+        st.success(f"Nalezeno {len(tickers)} symbolů. Začínám stahovat data (to chvíli potrvá)...")
+
+    # Progress bar
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
     results = []
+    total = len(tickers)
     
-    # Chunking to prevent overwhelming user UI, but processing all
-    total = len(ticker_list)
-    
-    # Using ThreadPool for speed - set to 20 workers to be safe with Yahoo API
+    # Multithreading (20 vláken)
     with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        future_to_ticker = {executor.submit(calculate_fair_price, t): t for t in ticker_list}
+        # Submit all tasks
+        future_to_ticker = {executor.submit(calculate_metrics, t): t for t in tickers}
         
         completed = 0
         for future in concurrent.futures.as_completed(future_to_ticker):
-            data = future.result()
-            if data:
-                results.append(data)
+            res = future.result()
+            if res:
+                results.append(res)
+            
             completed += 1
-            # Update UI every 5 tickers to reduce lag
+            # Aktualizace progress baru každých 5 položek
             if completed % 5 == 0 or completed == total:
-                prog_bar.progress(completed / total)
-                status_area.text(f"Scanning {completed}/{total} stocks... ({len(results)} successful)")
-
-    prog_bar.empty()
-    status_area.empty()
+                progress_bar.progress(completed / total)
+                status_text.text(f"Analyzováno: {completed} / {total}")
+    
+    progress_bar.empty()
+    status_text.empty()
     
     if results:
         df = pd.DataFrame(results)
-        # Reorder columns nicely: Key info first, then the rest
-        priority = ['Ticker', 'Price', 'Fair Value', 'Diff %', 'Beat Prob', 'Sector', 'PE', 'PEG']
-        other_cols = [c for c in df.columns if c not in priority]
-        final_cols = priority + other_cols
+        # Seřadit sloupce: Ticker, Cena, Fair Value, Diff %, zbytek
+        cols = ['Ticker', 'Price', 'Fair Value', 'Diff %', 'Sector', 'PE', 'PEG', 'Profit Margin', 'Debt/Equity', 'Mkt Cap']
+        # Přidat ostatní sloupce, které nejsou v seznamu
+        all_cols = cols + [c for c in df.columns if c not in cols]
+        # Filtrovat jen existující
+        final_cols = [c for c in all_cols if c in df.columns]
         
-        st.session_state['stock_df'] = df[final_cols].sort_values('Diff %', ascending=False)
+        st.session_state['data_result'] = df[final_cols].sort_values('Diff %', ascending=False)
     else:
-        st.error("No data loaded. Yahoo Finance might be blocking requests momentarily.")
+        st.error("Nepodařilo se stáhnout žádná data.")
 
-# --- Buttons ---
+# Tlačítka
 c1, c2, c3, c4, c5 = st.columns(5)
+
 with c1:
-    if st.button(f"Load S&P 500"):
-        ts = get_sp500_tickers()
-        st.info(f"Found {len(ts)} tickers. Starting scan...")
-        run_bulk_analysis(ts, "S&P 500")
+    if st.button("Load S&P 500 (500+)"):
+        load_market_data(get_sp500_tickers, "S&P 500")
 with c2:
-    if st.button("Load NASDAQ 100"):
-        ts = get_nasdaq_tickers()
-        st.info(f"Found {len(ts)} tickers. Starting scan...")
-        run_bulk_analysis(ts, "NASDAQ 100")
+    if st.button("Load NASDAQ (100+)"):
+        load_market_data(get_nasdaq_tickers, "NASDAQ 100")
 with c3:
     if st.button("Load Hang Seng"):
-        ts = get_hang_seng_tickers()
-        run_bulk_analysis(ts, "Hang Seng")
+        load_market_data(get_hang_seng_tickers, "Hang Seng")
 with c4:
     if st.button("Load Nikkei 225"):
-        ts = get_nikkei_tickers()
-        st.info(f"Found {len(ts)} tickers. Starting scan...")
-        run_bulk_analysis(ts, "Nikkei 225")
+        load_market_data(get_nikkei_tickers, "Nikkei 225")
 with c5:
-    if st.button("Load Custom"):
-        # Example small list
-        custom = ['NVDA','AAPL','MSFT','TSLA','AMD','PLTR','COIN','MSTR']
-        run_bulk_analysis(custom, "Tech Favorites")
+    if st.button("Clear / Reset"):
+        st.session_state['data_result'] = pd.DataFrame()
 
-# --- Display ---
-if not st.session_state['stock_df'].empty:
-    st.subheader(f"Results: {st.session_state['list_name']} ({len(st.session_state['stock_df'])} stocks)")
+# Zobrazení tabulky
+if not st.session_state['data_result'].empty:
+    df = st.session_state['data_result']
     
-    # Interactive Data Editor - This allows sorting and filtering in the UI
+    st.subheader(f"Výsledky: {st.session_state['active_index']} ({len(df)} akcií)")
+    
+    # Data Editor s plnými daty
     st.data_editor(
-        st.session_state['stock_df'],
+        df,
         column_config={
             "Diff %": st.column_config.NumberColumn(
-                "Undervalued %",
-                help="Positive Green = Undervalued",
+                "Podhodnocení %",
+                help="Kladné číslo = Levná akcie (Buy)",
                 format="%.2f %%"
             ),
-            "Market Cap": st.column_config.NumberColumn("Mkt Cap", format="$%d"),
-            "Price": st.column_config.NumberColumn("Price", format="$%.2f"),
-            "Fair Value": st.column_config.NumberColumn("Fair Val", format="$%.2f"),
+            "Price": st.column_config.NumberColumn("Cena", format="$%.2f"),
+            "Fair Value": st.column_config.NumberColumn("Fér Hodnota", format="$%.2f"),
+            "Mkt Cap": st.column_config.NumberColumn("Market Cap", format="$%d"),
+            "Profit Margin": st.column_config.NumberColumn("Marže", format="%.2f"),
         },
-        height=600,
+        height=700,
         use_container_width=True,
-        disabled=True # Read only
+        disabled=True # Read-only
     )
     
-    # Download button
-    csv = st.session_state['stock_df'].to_csv(index=False).encode('utf-8')
-    st.download_button("Download CSV", data=csv, file_name="stock_analysis.csv", mime="text/csv")
-
-st.markdown(f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
+    # Export do CSV
+    csv = df.to_csv(index=False).encode('utf-8')
+    st.download_button(
+        label="Stáhnout CSV",
+        data=csv,
+        file_name=f"{st.session_state['active_index']}_analysis.csv",
+        mime='text/csv',
+    )
