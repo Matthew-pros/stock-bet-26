@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -466,4 +465,3 @@ def process_tickers(tickers):
                     st.dataframe(filtered, use_container_width=True)
 
 st.markdown(f'Updated: {datetime.now().strftime("%Y-%m-%d %H:%M")}') 
-```
